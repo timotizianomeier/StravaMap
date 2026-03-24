@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>London Run Explorer</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.heat -->
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+
+  <!-- Chart.js (elevation profile) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ── Auth banner ─────────────────────────────────────────────────────────── -->
+<div id="auth-banner" class="banner banner-warn hidden">
+  ⚠️ Not connected to Strava.
+  <a href="/auth/strava">Connect Strava →</a>
+</div>
+<div id="rate-banner" class="banner banner-warn hidden">
+  ⚠️ Strava rate limit reached — showing cached data.
+</div>
+<div id="error-banner" class="banner banner-error hidden"></div>
+
+<!-- ── Layout ──────────────────────────────────────────────────────────────── -->
+<div id="app">
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <header>
+      <div class="logo">🗺 London Run Explorer</div>
+      <div id="athlete-name" class="athlete"></div>
+    </header>
+
+    <!-- Stats -->
+    <section class="stats-bar" id="stats-bar">
+      <div class="stat"><span id="stat-runs">—</span><label>Runs</label></div>
+      <div class="stat"><span id="stat-km">—</span><label>km total</label></div>
+      <div class="stat"><span id="stat-areas">—</span><label>areas covered</label></div>
+    </section>
+
+    <!-- Sync controls -->
+    <section class="sync-bar">
+      <button id="btn-sync" class="btn-primary" onclick="syncRuns()">
+        <span id="sync-icon">↻</span> Sync new runs
+      </button>
+      <div id="last-sync" class="last-sync">Never synced</div>
+    </section>
+
+    <!-- Filters -->
+    <section class="filters">
+      <div class="filter-group">
+        <strong>Type</strong>
+        <label><input type="checkbox" class="type-filter" value="Run"   checked> 🏃 Run</label>
+        <label><input type="checkbox" class="type-filter" value="Ride"  checked> 🚴 Ride</label>
+        <label><input type="checkbox" class="type-filter" value="Walk"  checked> 🚶 Walk</label>
+        <label><input type="checkbox" class="type-filter" value="Hike"  checked> 🥾 Hike</label>
+        <label><input type="checkbox" class="type-filter" value="Other" checked> ◌ Other</label>
+      </div>
+      <div class="filter-group">
+        <strong>Date range</strong>
+        <select id="date-filter">
+          <option value="all">All time</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 3 months</option>
+          <option value="180">Last 6 months</option>
+          <option value="365">Last year</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- Map view toggles -->
+    <section class="view-toggles">
+      <button id="btn-routes"  class="toggle-btn active"   onclick="setView('routes')">All routes</button>
+      <button id="btn-heatmap" class="toggle-btn"          onclick="setView('heatmap')">Heatmap</button>
+      <button id="btn-unexplored" class="toggle-btn"       onclick="toggleUnexplored()">Unexplored</button>
+      <button id="btn-suggest" class="toggle-btn suggest"  onclick="suggestNextRun()">💡 Suggest run</button>
+    </section>
+
+    <!-- Activity list -->
+    <section class="activity-list-wrapper">
+      <input id="search" type="search" placeholder="Search activities…" oninput="renderList()" />
+      <ul id="activity-list"></ul>
+    </section>
+
+    <!-- Elevation chart (shown when an activity is selected) -->
+    <section id="elevation-panel" class="elevation-panel hidden">
+      <div class="elevation-header">
+        <span id="elevation-title">Elevation</span>
+        <button onclick="deselectActivity()" class="close-btn">✕</button>
+      </div>
+      <canvas id="elevation-chart"></canvas>
+    </section>
+  </aside>
+
+  <!-- Map -->
+  <main id="map"></main>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
