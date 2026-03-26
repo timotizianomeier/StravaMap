@@ -125,6 +125,26 @@ app.get('/api/activities', (req, res) => {
   res.json(readActivities());
 });
 
+// ─── /api/boroughs ────────────────────────────────────────────────────────────
+const BOROUGHS_F = path.join(CACHE_DIR, 'boroughs.json');
+
+app.get('/api/boroughs', async (req, res) => {
+  if (fs.existsSync(BOROUGHS_F)) {
+    return res.sendFile(BOROUGHS_F);
+  }
+  try {
+    const { data } = await axios.get(
+      'https://raw.githubusercontent.com/radoi90/housequest-data/master/london_boroughs.geojson',
+      { timeout: 10000 }
+    );
+    fs.writeFileSync(BOROUGHS_F, JSON.stringify(data));
+    res.json(data);
+  } catch (err) {
+    console.error('Failed to fetch borough boundaries:', err.message);
+    res.json({ type: 'FeatureCollection', features: [] });
+  }
+});
+
 // ─── /api/activity/:id/stream ─────────────────────────────────────────────────
 app.get('/api/activity/:id/stream', async (req, res) => {
   const { id } = req.params;

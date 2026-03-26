@@ -8,13 +8,24 @@ const LONDON_BOUNDS = { minLat: 51.28, maxLat: 51.72, minLng: -0.51, maxLng: 0.3
 const GRID_SIZE     = 0.01; // ~1 km grid cells
 
 const TYPE_COLOR = {
-  Run:     '#2563eb', // blue
-  VirtualRun: '#2563eb',
-  Ride:    '#f97316', // orange
+  Run:        '#3b82f6', // blue
+  VirtualRun: '#3b82f6',
+  Ride:       '#f97316', // orange
   VirtualRide:'#f97316',
-  Walk:    '#16a34a', // green
-  Hike:    '#16a34a',
-  default: '#9ca3af', // grey
+  Walk:       '#22c55e', // green
+  Hike:       '#22c55e',
+  default:    '#94a3b8', // grey
+};
+
+// Brighter variants for dark mode
+const TYPE_COLOR_DARK = {
+  Run:        '#60a5fa',
+  VirtualRun: '#60a5fa',
+  Ride:       '#fb923c',
+  VirtualRide:'#fb923c',
+  Walk:       '#4ade80',
+  Hike:       '#4ade80',
+  default:    '#94a3b8',
 };
 
 const TYPE_ICON = {
@@ -26,6 +37,10 @@ const TYPE_ICON = {
 
 // ── State ────────────────────────────────────────────────────────────────────
 let map;
+let tileLayer       = null;
+let labelsLayer     = null;
+let boroughLayer    = null;
+let boroughGeoJSON  = null;   // cached for re-render on theme switch
 let allActivities   = [];
 let polylineLayers  = {};    // { id: { layer, activity } }
 let heatLayer       = null;
@@ -36,6 +51,7 @@ let activeId        = null;
 let currentView     = 'routes'; // 'routes' | 'heatmap'
 let showUnexplored  = false;
 let visitedCells    = new Set(); // "lat_lng" keys
+let darkMode        = localStorage.getItem('darkMode') === 'true';
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', init);
@@ -54,6 +70,7 @@ async function init() {
     document.getElementById('auth-banner').classList.remove('hidden');
   }
 
+  loadBoroughs();
   await loadActivities();
 }
 
@@ -67,10 +84,19 @@ function initMap() {
     zoomControl: true,
   });
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19,
-  }).addTo(map);
+  // Custom panes: base (200) → boroughs (250) → routes (400, default) → labels (650)
+  map.createPane('boroughs');
+  map.getPane('boroughs').style.zIndex = 250;
+  map.getPane('boroughs').style.pointerEvents = 'none';
+  map.createPane('labels');
+  map.getPane('labels').style.zIndex = 650;
+  map.getPane('labels').style.pointerEvents = 'none';
+
+  tileLayer   = makeTileLayer(darkMode).addTo(map);
+  labelsLayer = makeLabelsLayer(darkMode).addTo(map);
+
+  // Apply saved dark mode on load
+  applyDarkMode(false);
 
   // Persist view
   map.on('moveend zoomend', () => {
@@ -81,17 +107,93 @@ function initMap() {
   const legend = L.control({ position: 'bottomright' });
   legend.onAdd = () => {
     const div = L.DomUtil.create('div', 'map-legend');
+    const p = darkMode ? TYPE_COLOR_DARK : TYPE_COLOR;
     div.innerHTML = [
-      ['🏃 Run',  TYPE_COLOR.Run],
-      ['🚴 Ride', TYPE_COLOR.Ride],
-      ['🚶 Walk', TYPE_COLOR.Walk],
-      ['◌ Other', TYPE_COLOR.default],
+      ['🏃 Run',  p.Run],
+      ['🚴 Ride', p.Ride],
+      ['🚶 Walk', p.Walk],
+      ['◌ Other', p.default],
     ].map(([label, color]) =>
       `<div class="leg-item"><div class="leg-swatch" style="background:${color}"></div>${label}</div>`
     ).join('');
     return div;
   };
   legend.addTo(map);
+}
+
+// ── Dark mode ─────────────────────────────────────────────────────────────────
+function makeTileLayer(dark) {
+  const url = dark
+    ? 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png'
+    : 'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png';
+  return L.tileLayer(url, {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions">CARTO</a>',
+    maxZoom: 19,
+  });
+}
+
+function makeLabelsLayer(dark) {
+  const url = dark
+    ? 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
+    : 'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png';
+  return L.tileLayer(url, { pane: 'labels', maxZoom: 19, attribution: '' });
+}
+
+function applyDarkMode(redraw = true) {
+  document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.textContent = darkMode ? '☀️' : '🌙';
+  if (redraw) applyFilters();
+}
+
+function toggleDarkMode() {
+  darkMode = !darkMode;
+  localStorage.setItem('darkMode', darkMode);
+
+  if (tileLayer)   { map.removeLayer(tileLayer);   tileLayer   = makeTileLayer(darkMode).addTo(map);   tileLayer.bringToBack(); }
+  if (labelsLayer) { map.removeLayer(labelsLayer);  labelsLayer = makeLabelsLayer(darkMode).addTo(map); }
+  if (boroughGeoJSON) renderBoroughs(boroughGeoJSON);
+
+  applyDarkMode(true);
+}
+
+// ── Borough boundaries ────────────────────────────────────────────────────────
+async function loadBoroughs() {
+  try {
+    const r = await fetch('/api/boroughs');
+    boroughGeoJSON = await r.json();
+    renderBoroughs(boroughGeoJSON);
+  } catch (e) {
+    console.warn('Could not load borough boundaries:', e);
+  }
+}
+
+function renderBoroughs(geojson) {
+  if (boroughLayer) map.removeLayer(boroughLayer);
+
+  const lineColor = darkMode ? 'rgba(200,150,255,0.45)' : 'rgba(130,60,200,0.35)';
+
+  boroughLayer = L.geoJSON(geojson, {
+    pane: 'boroughs',
+    style: {
+      color:     lineColor,
+      weight:    0.8,
+      fill:      false,
+      dashArray: '5,5',
+    },
+    onEachFeature(feature, layer) {
+      const name = feature.properties?.name
+                || feature.properties?.NAME
+                || feature.properties?.lad19nm
+                || '';
+      if (!name) return;
+      layer.bindTooltip(name, {
+        permanent:  true,
+        direction:  'center',
+        className:  'borough-label',
+      });
+    },
+  }).addTo(map);
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
@@ -586,7 +688,8 @@ function updateSyncTime(iso) {
 }
 
 function getColor(type) {
-  return TYPE_COLOR[type] ?? TYPE_COLOR.default;
+  const palette = darkMode ? TYPE_COLOR_DARK : TYPE_COLOR;
+  return palette[type] ?? palette.default;
 }
 
 function getIcon(type) {
