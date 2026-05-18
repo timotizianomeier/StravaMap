@@ -127,6 +127,7 @@ app.get('/api/activities', (req, res) => {
 
 // ─── /api/boroughs ────────────────────────────────────────────────────────────
 const BOROUGHS_F = path.join(CACHE_DIR, 'boroughs.json');
+const PARKS_F    = path.join(CACHE_DIR, 'parks.json');
 
 app.get('/api/boroughs', async (req, res) => {
   if (fs.existsSync(BOROUGHS_F)) {
@@ -142,6 +143,30 @@ app.get('/api/boroughs', async (req, res) => {
   } catch (err) {
     console.error('Failed to fetch borough boundaries:', err.message);
     res.json({ type: 'FeatureCollection', features: [] });
+  }
+});
+
+// ─── /api/parks ───────────────────────────────────────────────────────────────
+app.get('/api/parks', async (req, res) => {
+  if (fs.existsSync(PARKS_F)) return res.sendFile(PARKS_F);
+  try {
+    const query = '[out:json][timeout:30];(way["leisure"="park"](51.28,-0.51,51.72,0.34);relation["leisure"="park"](51.28,-0.51,51.72,0.34););out bb;';
+    const { data } = await axios.post(
+      'https://overpass-api.de/api/interpreter',
+      `data=${encodeURIComponent(query)}`,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 35000 }
+    );
+    const parks = data.elements
+      .filter(e => e.bounds)
+      .map(e => ({
+        minLat: e.bounds.minlat, maxLat: e.bounds.maxlat,
+        minLng: e.bounds.minlon, maxLng: e.bounds.maxlon,
+      }));
+    fs.writeFileSync(PARKS_F, JSON.stringify(parks));
+    res.json(parks);
+  } catch (err) {
+    console.error('Failed to fetch parks:', err.message);
+    res.json([]);
   }
 });
 

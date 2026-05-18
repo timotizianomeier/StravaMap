@@ -45,8 +45,10 @@ let allActivities   = [];
 let polylineLayers  = {};    // { id: { layer, activity } }
 let heatLayer       = null;
 let coverageLayer   = null;
-let suggestionMarker = null;
-let elevChart       = null;
+let suggestionMarker  = null;
+let suggestionPolygon = null;
+let parkCells         = new Set(); // grid keys overlapping OSM parks
+let elevChart         = null;
 let activeId        = null;
 let currentView     = 'routes'; // 'routes' | 'heatmap'
 let showUnexplored  = false;
@@ -72,6 +74,7 @@ async function init() {
 
   loadBoroughs();
   await loadActivities();
+  loadParks(); // fire-and-forget; improves suggestions once resolved
 }
 
 // ── Map setup ─────────────────────────────────────────────────────────────────
@@ -408,8 +411,9 @@ function toggleUnexplored() {
   if (showUnexplored) {
     buildUnexploredLayer();
   } else {
-    if (coverageLayer) { coverageLayer.remove(); coverageLayer = null; }
-    if (suggestionMarker) { map.removeLayer(suggestionMarker); suggestionMarker = null; }
+    if (coverageLayer)    { coverageLayer.remove();              coverageLayer    = null; }
+    if (suggestionMarker)  { map.removeLayer(suggestionMarker);  suggestionMarker  = null; }
+    if (suggestionPolygon) { map.removeLayer(suggestionPolygon); suggestionPolygon = null; }
   }
 }
 
@@ -500,10 +504,31 @@ class CanvasCoverageLayer {
 }
 
 // ── Suggest next run ──────────────────────────────────────────────────────────
-function suggestNextRun() {
-  if (suggestionMarker) { map.removeLayer(suggestionMarker); suggestionMarker = null; }
+async function suggestNextRun() {
+  if (suggestionMarker)  { map.removeLayer(suggestionMarker);  suggestionMarker  = null; }
+  if (suggestionPolygon) { map.removeLayer(suggestionPolygon); suggestionPolygon = null; }
 
-  // Build unvisited cells within a tighter "inner London" area
+  const btn = document.getElementById('btn-suggest');
+  btn.disabled = true;
+  btn.textContent = '⏳ Locating…';
+
+  // Try to get current position (5-second timeout, non-blocking fallback)
+  let userPos = null;
+  try {
+    userPos = await new Promise(resolve => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+        () => resolve(null),
+        { timeout: 5000, maximumAge: 60000 }
+      );
+    });
+  } catch {}
+
+  btn.disabled = false;
+  btn.textContent = '💡 Suggest run';
+
+  // Build unvisited cells in inner London
   const innerBounds = { minLat: 51.38, maxLat: 51.62, minLng: -0.35, maxLng: 0.18 };
   const unvisited   = [];
   for (let lat = innerBounds.minLat; lat < innerBounds.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
@@ -518,41 +543,65 @@ function suggestNextRun() {
     return;
   }
 
-  // Find largest cluster via BFS
-  const cellSet   = new Set(unvisited.map(([lat, lng]) => `${lat.toFixed(4)}_${lng.toFixed(4)}`));
-  const visited   = new Set();
-  let bestCluster = [];
-
-  const getKey = (lat, lng) => `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+  // BFS to find all contiguous clusters
+  const cellSet = new Set(unvisited.map(([lat, lng]) => `${lat.toFixed(4)}_${lng.toFixed(4)}`));
+  const seen    = new Set();
+  const clusters = [];
+  const getKey  = (lat, lng) => `${lat.toFixed(4)}_${lng.toFixed(4)}`;
 
   for (const [startLat, startLng] of unvisited) {
     const sk = getKey(startLat, startLng);
-    if (visited.has(sk)) continue;
-
+    if (seen.has(sk)) continue;
     const cluster = [];
     const queue   = [[startLat, startLng]];
-    visited.add(sk);
-
+    seen.add(sk);
     while (queue.length) {
       const [lat, lng] = queue.shift();
       cluster.push([lat, lng]);
-
       for (const [dlat, dlng] of [[GRID_SIZE,0],[-GRID_SIZE,0],[0,GRID_SIZE],[0,-GRID_SIZE]]) {
         const nLat = +(lat + dlat).toFixed(4);
         const nLng = +(lng + dlng).toFixed(4);
         const nk   = getKey(nLat, nLng);
-        if (cellSet.has(nk) && !visited.has(nk)) {
-          visited.add(nk);
-          queue.push([nLat, nLng]);
-        }
+        if (cellSet.has(nk) && !seen.has(nk)) { seen.add(nk); queue.push([nLat, nLng]); }
       }
     }
-    if (cluster.length > bestCluster.length) bestCluster = cluster;
+    if (cluster.length >= 2) clusters.push(cluster);
   }
 
-  // Center of the best cluster
-  const avgLat = bestCluster.reduce((s, [lat]) => s + lat, 0) / bestCluster.length;
-  const avgLng = bestCluster.reduce((s, [, lng]) => s + lng, 0) / bestCluster.length;
+  if (!clusters.length) {
+    showToast("You've explored all of inner London! 🎉", 'success');
+    return;
+  }
+
+  // Score = size × (1 + 0.4 × parkFraction) / (1 + distKm/8)
+  // Proximity and park overlap both lift the score; size still dominates.
+  const best = clusters.reduce((best, cluster) => {
+    const avgLat    = cluster.reduce((s, [lat])    => s + lat, 0) / cluster.length;
+    const avgLng    = cluster.reduce((s, [, lng])  => s + lng, 0) / cluster.length;
+    const parkCount = cluster.filter(([lat, lng]) => parkCells.has(getKey(lat, lng))).length;
+    const parkFrac  = parkCount / cluster.length;
+    const distKm    = userPos ? haversineKm(userPos.lat, userPos.lng, avgLat, avgLng) : 0;
+    const score     = cluster.length * (1 + 0.4 * parkFrac) / (userPos ? 1 + distKm / 8 : 1);
+    return score > best.score ? { cluster, avgLat, avgLng, parkFrac, distKm, score } : best;
+  }, { score: -Infinity });
+
+  // Convex hull of all cell corners → polygon showing the area to explore
+  const corners = [];
+  for (const [lat, lng] of best.cluster) {
+    corners.push([lat,             lng            ]);
+    corners.push([lat,             lng + GRID_SIZE]);
+    corners.push([lat + GRID_SIZE, lng            ]);
+    corners.push([lat + GRID_SIZE, lng + GRID_SIZE]);
+  }
+  const hull = convexHull(corners);
+
+  suggestionPolygon = L.polygon(hull, {
+    color:       '#f59e0b',
+    fillColor:   '#f59e0b',
+    fillOpacity: 0.12,
+    weight:      2,
+    dashArray:   '8,4',
+  }).addTo(map);
 
   const icon = L.divIcon({
     className: '',
@@ -561,19 +610,22 @@ function suggestNextRun() {
     iconAnchor: [18, 18],
   });
 
-  suggestionMarker = L.marker([avgLat, avgLng], { icon })
+  const parkNote = best.parkFrac > 0.25 ? '<br>🌳 Includes park areas' : '';
+  const distNote = userPos ? `<br>📍 ${best.distKm.toFixed(1)} km from you` : '';
+
+  suggestionMarker = L.marker([best.avgLat, best.avgLng], { icon })
     .bindPopup(
       `<div class="suggest-popup">
-        <strong>Suggested next run</strong>
-        Unexplored area: ~${bestCluster.length} grid cells (≈${(bestCluster.length).toFixed(0)} km²) not yet covered.<br><br>
-        <em>Start here and explore!</em>
+        <strong>Suggested next run</strong><br>
+        ~${best.cluster.length} km² unexplored${parkNote}${distNote}<br><br>
+        <em>Explore the highlighted area!</em>
       </div>`,
-      { maxWidth: 200 }
+      { maxWidth: 220 }
     )
     .addTo(map)
     .openPopup();
 
-  map.setView([avgLat, avgLng], 14);
+  map.fitBounds(suggestionPolygon.getBounds(), { padding: [60, 60] });
 
   if (!showUnexplored) {
     showUnexplored = true;
@@ -581,6 +633,55 @@ function suggestNextRun() {
     document.getElementById('btn-unexplored').textContent = 'Unexplored ✓';
     buildUnexploredLayer();
   }
+}
+
+// ── Parks + helpers for suggestions ───────────────────────────────────────────
+async function loadParks() {
+  try {
+    const r = await fetch('/api/parks');
+    const parks = await r.json();
+    // Precompute a Set of all grid cell keys that overlap any park bounding box
+    const cells = new Set();
+    for (const p of parks) {
+      const startLat = +(Math.floor(p.minLat / GRID_SIZE) * GRID_SIZE).toFixed(4);
+      const startLng = +(Math.floor(p.minLng / GRID_SIZE) * GRID_SIZE).toFixed(4);
+      for (let lat = startLat; lat <= p.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
+        for (let lng = startLng; lng <= p.maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
+          cells.add(`${lat.toFixed(4)}_${lng.toFixed(4)}`);
+        }
+      }
+    }
+    parkCells = cells;
+  } catch { /* non-critical */ }
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R    = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a    = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Andrew's monotone chain — returns hull as [lat, lng] pairs
+function convexHull(points) {
+  if (points.length < 3) return points;
+  const pts   = points.slice().sort((a, b) => a[1] !== b[1] ? a[1] - b[1] : a[0] - b[0]);
+  const cross = (O, A, B) => (A[0]-O[0])*(B[1]-O[1]) - (A[1]-O[1])*(B[0]-O[0]);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop();
+  lower.pop();
+  return [...lower, ...upper];
 }
 
 // ── Activity list rendering ───────────────────────────────────────────────────
