@@ -47,6 +47,10 @@ let heatLayer       = null;
 let coverageLayer   = null;
 let suggestionMarker  = null;
 let suggestionPolygon = null;
+let suggestionRoute   = null;   // Leaflet polyline of the generated loop
+let suggestionCoords  = null;   // [lat, lng] pairs of the loop (for GPX export)
+let suggestDistanceKm = +(localStorage.getItem('suggestDistanceKm') || 10);
+let boroughCellIndex  = null;   // Map: grid cell key → borough name (built lazily)
 let parkCells         = new Set(); // grid keys overlapping OSM parks
 let elevChart         = null;
 let activeId        = null;
@@ -72,6 +76,7 @@ async function init() {
     document.getElementById('auth-banner').classList.remove('hidden');
   }
 
+  setSuggestDistance(suggestDistanceKm);
   loadBoroughs();
   await loadActivities();
   loadParks(); // fire-and-forget; improves suggestions once resolved
@@ -411,10 +416,16 @@ function toggleUnexplored() {
   if (showUnexplored) {
     buildUnexploredLayer();
   } else {
-    if (coverageLayer)    { coverageLayer.remove();              coverageLayer    = null; }
-    if (suggestionMarker)  { map.removeLayer(suggestionMarker);  suggestionMarker  = null; }
-    if (suggestionPolygon) { map.removeLayer(suggestionPolygon); suggestionPolygon = null; }
+    if (coverageLayer) { coverageLayer.remove(); coverageLayer = null; }
+    clearSuggestion();
   }
+}
+
+function clearSuggestion() {
+  if (suggestionMarker)  { map.removeLayer(suggestionMarker);  suggestionMarker  = null; }
+  if (suggestionPolygon) { map.removeLayer(suggestionPolygon); suggestionPolygon = null; }
+  if (suggestionRoute)   { map.removeLayer(suggestionRoute);   suggestionRoute   = null; }
+  suggestionCoords = null;
 }
 
 // ── Coverage grid & unexplored overlay ───────────────────────────────────────
@@ -504,9 +515,15 @@ class CanvasCoverageLayer {
 }
 
 // ── Suggest next run ──────────────────────────────────────────────────────────
+function setSuggestDistance(km) {
+  suggestDistanceKm = km;
+  localStorage.setItem('suggestDistanceKm', km);
+  document.querySelectorAll('.dist-pill').forEach(b =>
+    b.classList.toggle('active', +b.dataset.km === km));
+}
+
 async function suggestNextRun() {
-  if (suggestionMarker)  { map.removeLayer(suggestionMarker);  suggestionMarker  = null; }
-  if (suggestionPolygon) { map.removeLayer(suggestionPolygon); suggestionPolygon = null; }
+  clearSuggestion();
 
   const btn = document.getElementById('btn-suggest');
   btn.disabled = true;
@@ -525,114 +542,236 @@ async function suggestNextRun() {
     });
   } catch {}
 
-  btn.disabled = false;
-  btn.textContent = '💡 Suggest run';
+  try {
+    // Restrict the search to boroughs the athlete has barely set foot in
+    if (!boroughCellIndex) boroughCellIndex = buildBoroughCellIndex();
+    const targetBoroughs = pickTargetBoroughs();
 
-  // Build unvisited cells in inner London
-  const innerBounds = { minLat: 51.38, maxLat: 51.62, minLng: -0.35, maxLng: 0.18 };
-  const unvisited   = [];
-  for (let lat = innerBounds.minLat; lat < innerBounds.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
-    for (let lng = innerBounds.minLng; lng < innerBounds.maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
-      const key = `${lat.toFixed(4)}_${lng.toFixed(4)}`;
-      if (!visitedCells.has(key)) unvisited.push([lat, lng]);
-    }
-  }
-
-  if (!unvisited.length) {
-    showToast("You've explored all of inner London! 🎉", 'success');
-    return;
-  }
-
-  // BFS to find all contiguous clusters
-  const cellSet = new Set(unvisited.map(([lat, lng]) => `${lat.toFixed(4)}_${lng.toFixed(4)}`));
-  const seen    = new Set();
-  const clusters = [];
-  const getKey  = (lat, lng) => `${lat.toFixed(4)}_${lng.toFixed(4)}`;
-
-  for (const [startLat, startLng] of unvisited) {
-    const sk = getKey(startLat, startLng);
-    if (seen.has(sk)) continue;
-    const cluster = [];
-    const queue   = [[startLat, startLng]];
-    seen.add(sk);
-    while (queue.length) {
-      const [lat, lng] = queue.shift();
-      cluster.push([lat, lng]);
-      for (const [dlat, dlng] of [[GRID_SIZE,0],[-GRID_SIZE,0],[0,GRID_SIZE],[0,-GRID_SIZE]]) {
-        const nLat = +(lat + dlat).toFixed(4);
-        const nLng = +(lng + dlng).toFixed(4);
-        const nk   = getKey(nLat, nLng);
-        if (cellSet.has(nk) && !seen.has(nk)) { seen.add(nk); queue.push([nLat, nLng]); }
+    // Build unvisited cells in inner London, limited to target boroughs
+    const innerBounds = { minLat: 51.38, maxLat: 51.62, minLng: -0.35, maxLng: 0.18 };
+    const getKey  = (lat, lng) => `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+    const unvisited = [];
+    const cellSet   = new Set();
+    for (let lat = innerBounds.minLat; lat < innerBounds.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
+      for (let lng = innerBounds.minLng; lng < innerBounds.maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
+        const key = getKey(lat, lng);
+        if (visitedCells.has(key)) continue;
+        if (targetBoroughs && !targetBoroughs.has(boroughCellIndex.get(key))) continue;
+        unvisited.push([lat, lng]);
+        cellSet.add(key);
       }
     }
-    if (cluster.length >= 2) clusters.push(cluster);
-  }
 
-  if (!clusters.length) {
-    showToast("You've explored all of inner London! 🎉", 'success');
-    return;
-  }
+    if (!unvisited.length) {
+      showToast("You've explored every borough! 🎉", 'success');
+      return;
+    }
 
-  // Score = size × (1 + 0.4 × parkFraction) / (1 + distKm/8)
-  // Proximity and park overlap both lift the score; size still dominates.
-  const best = clusters.reduce((best, cluster) => {
-    const avgLat    = cluster.reduce((s, [lat])    => s + lat, 0) / cluster.length;
-    const avgLng    = cluster.reduce((s, [, lng])  => s + lng, 0) / cluster.length;
-    const parkCount = cluster.filter(([lat, lng]) => parkCells.has(getKey(lat, lng))).length;
-    const parkFrac  = parkCount / cluster.length;
-    const distKm    = userPos ? haversineKm(userPos.lat, userPos.lng, avgLat, avgLng) : 0;
-    const score     = cluster.length * (1 + 0.4 * parkFrac) / (userPos ? 1 + distKm / 8 : 1);
-    return score > best.score ? { cluster, avgLat, avgLng, parkFrac, distKm, score } : best;
-  }, { score: -Infinity });
+    // A loop of L km reaches roughly L/4 km out from its start, so score each
+    // candidate cell by how unexplored its (2r+1)² neighbourhood is, boosted
+    // by parks and closeness to the user (or the current map view).
+    const radiusCells = Math.max(1, Math.round(suggestDistanceKm / 4));
+    const ref = userPos ?? { lat: map.getCenter().lat, lng: map.getCenter().lng };
 
-  // Convex hull of all cell corners → polygon showing the area to explore
-  const corners = [];
-  for (const [lat, lng] of best.cluster) {
-    corners.push([lat,             lng            ]);
-    corners.push([lat,             lng + GRID_SIZE]);
-    corners.push([lat + GRID_SIZE, lng            ]);
-    corners.push([lat + GRID_SIZE, lng + GRID_SIZE]);
-  }
-  const hull = convexHull(corners);
+    let best = null;
+    for (const [lat, lng] of unvisited) {
+      let local = 0, parks = 0, total = 0;
+      for (let dy = -radiusCells; dy <= radiusCells; dy++) {
+        for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+          const k = getKey(+(lat + dy * GRID_SIZE).toFixed(4), +(lng + dx * GRID_SIZE).toFixed(4));
+          total++;
+          if (cellSet.has(k))   local++;
+          if (parkCells.has(k)) parks++;
+        }
+      }
+      const cLat   = lat + GRID_SIZE / 2;
+      const cLng   = lng + GRID_SIZE / 2;
+      const distKm = haversineKm(ref.lat, ref.lng, cLat, cLng);
+      const score  = (local / total) * (1 + 0.4 * parks / total) / (1 + distKm / 8);
+      if (!best || score > best.score) {
+        best = { lat, lng, cLat, cLng, local, distKm, parkFrac: parks / total, score };
+      }
+    }
 
-  suggestionPolygon = L.polygon(hull, {
-    color:       '#f59e0b',
-    fillColor:   '#f59e0b',
-    fillOpacity: 0.12,
-    weight:      2,
-    dashArray:   '8,4',
-  }).addTo(map);
+    const boroughName = boroughCellIndex?.get(getKey(best.lat, best.lng)) ?? null;
 
-  const icon = L.divIcon({
-    className: '',
-    html: `<div style="background:#f59e0b;color:#fff;border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 2px 8px rgba(0,0,0,.3)">💡</div>`,
-    iconSize:   [36, 36],
-    iconAnchor: [18, 18],
-  });
+    // Convex hull of the unexplored cells around the seed → area to explore
+    const corners = [];
+    for (let dy = -radiusCells; dy <= radiusCells; dy++) {
+      for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+        const aLat = +(best.lat + dy * GRID_SIZE).toFixed(4);
+        const aLng = +(best.lng + dx * GRID_SIZE).toFixed(4);
+        if (!cellSet.has(getKey(aLat, aLng))) continue;
+        corners.push([aLat,             aLng            ]);
+        corners.push([aLat,             aLng + GRID_SIZE]);
+        corners.push([aLat + GRID_SIZE, aLng            ]);
+        corners.push([aLat + GRID_SIZE, aLng + GRID_SIZE]);
+      }
+    }
+    const hull = convexHull(corners);
 
-  const parkNote = best.parkFrac > 0.25 ? '<br>🌳 Includes park areas' : '';
-  const distNote = userPos ? `<br>📍 ${best.distKm.toFixed(1)} km from you` : '';
+    suggestionPolygon = L.polygon(hull, {
+      color:       '#f59e0b',
+      fillColor:   '#f59e0b',
+      fillOpacity: 0.12,
+      weight:      2,
+      dashArray:   '8,4',
+    }).addTo(map);
 
-  suggestionMarker = L.marker([best.avgLat, best.avgLng], { icon })
-    .bindPopup(
-      `<div class="suggest-popup">
-        <strong>Suggested next run</strong><br>
-        ~${best.cluster.length} km² unexplored${parkNote}${distNote}<br><br>
+    // Ask the server for a real round-trip loop seeded at the cluster centre
+    btn.textContent = '⏳ Routing…';
+    let routeFeature = null;
+    let routeErr     = null;
+    try {
+      const seed = Math.floor(Math.random() * 100);
+      const r    = await fetch(`/api/route-suggestion?lat=${best.cLat}&lng=${best.cLng}&distance=${suggestDistanceKm * 1000}&seed=${seed}`);
+      const data = await r.json();
+      if (r.ok && data.features?.length) routeFeature = data.features[0];
+      else routeErr = data.error || 'No route returned';
+    } catch (e) {
+      routeErr = e.message;
+    }
+
+    const parkNote = best.parkFrac > 0.25 ? '<br>🌳 Includes park areas' : '';
+    const distNote = userPos ? `<br>📍 ${best.distKm.toFixed(1)} km from you` : '';
+    const inBorough = boroughName ? ` in ${boroughName}` : '';
+
+    let markerPos, popupHtml;
+    if (routeFeature) {
+      suggestionCoords = routeFeature.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+      suggestionRoute  = L.polyline(suggestionCoords, { color: '#f59e0b', weight: 4, opacity: 0.9 }).addTo(map);
+      const actualKm = (routeFeature.properties?.summary?.distance ?? 0) / 1000;
+      markerPos = suggestionCoords[0];
+      popupHtml = `<div class="suggest-popup">
+        <strong>${suggestDistanceKm} km loop${inBorough}</strong><br>
+        📏 ${actualKm.toFixed(1)} km actual${parkNote}${distNote}<br><br>
+        <button class="gpx-btn" onclick="downloadSuggestionGpx()">⬇ Download GPX</button>
+      </div>`;
+    } else {
+      markerPos = [best.cLat, best.cLng];
+      popupHtml = `<div class="suggest-popup">
+        <strong>Suggested next run${inBorough}</strong><br>
+        ~${best.local} km² unexplored nearby${parkNote}${distNote}<br><br>
         <em>Explore the highlighted area!</em>
-      </div>`,
-      { maxWidth: 220 }
-    )
-    .addTo(map)
-    .openPopup();
+      </div>`;
+      if (routeErr === 'ORS_API_KEY not configured') {
+        showToast('Add ORS_API_KEY to .env to get real loop routes', 'warn');
+      } else if (routeErr) {
+        showToast(`Loop routing failed: ${routeErr}`, 'warn');
+      }
+    }
 
-  map.fitBounds(suggestionPolygon.getBounds(), { padding: [60, 60] });
+    const icon = L.divIcon({
+      className: '',
+      html: `<div style="background:#f59e0b;color:#fff;border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 2px 8px rgba(0,0,0,.3)">💡</div>`,
+      iconSize:   [36, 36],
+      iconAnchor: [18, 18],
+    });
 
-  if (!showUnexplored) {
-    showUnexplored = true;
-    document.getElementById('btn-unexplored').classList.add('on');
-    document.getElementById('btn-unexplored').textContent = 'Unexplored ✓';
-    buildUnexploredLayer();
+    suggestionMarker = L.marker(markerPos, { icon })
+      .bindPopup(popupHtml, { maxWidth: 220 })
+      .addTo(map)
+      .openPopup();
+
+    map.fitBounds((suggestionRoute ?? suggestionPolygon).getBounds(), { padding: [60, 60] });
+
+    if (!showUnexplored) {
+      showUnexplored = true;
+      document.getElementById('btn-unexplored').classList.add('on');
+      document.getElementById('btn-unexplored').textContent = 'Unexplored ✓';
+      buildUnexploredLayer();
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '💡 Suggest run';
   }
+}
+
+// ── Borough coverage helpers ──────────────────────────────────────────────────
+// Map every ~1 km grid cell to the borough containing its centre. Built once
+// (33 polygons × a few thousand candidate cells — a few ms).
+function buildBoroughCellIndex() {
+  if (!boroughGeoJSON?.features?.length) return null;
+  const index = new Map();
+  for (const f of boroughGeoJSON.features) {
+    const name  = f.properties?.name || 'Unknown';
+    const polys = f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : [f.geometry.coordinates];
+    for (const poly of polys) {
+      const ring = poly[0]; // outer ring; borough polygons have no holes
+      let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+      for (const [lng, lat] of ring) {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+      }
+      const startLat = +(Math.floor(minLat / GRID_SIZE) * GRID_SIZE).toFixed(4);
+      const startLng = +(Math.floor(minLng / GRID_SIZE) * GRID_SIZE).toFixed(4);
+      for (let lat = startLat; lat <= maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
+        for (let lng = startLng; lng <= maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
+          if (pointInRing(lng + GRID_SIZE / 2, lat + GRID_SIZE / 2, ring)) {
+            index.set(`${lat.toFixed(4)}_${lng.toFixed(4)}`, name);
+          }
+        }
+      }
+    }
+  }
+  return index;
+}
+
+// Boroughs where <5% of cells are visited count as "not been to yet".
+// If fewer than 3 qualify, fall back to the 5 least-explored so there is
+// always somewhere to suggest. Returns null when boroughs aren't loaded.
+function pickTargetBoroughs() {
+  if (!boroughCellIndex) return null;
+  const cov = new Map(); // name → { total, visited }
+  for (const [key, name] of boroughCellIndex) {
+    const c = cov.get(name) || { total: 0, visited: 0 };
+    c.total++;
+    if (visitedCells.has(key)) c.visited++;
+    cov.set(name, c);
+  }
+  const ranked = [...cov.entries()]
+    .map(([name, c]) => ({ name, frac: c.visited / c.total }))
+    .sort((a, b) => a.frac - b.frac);
+  const fresh = ranked.filter(b => b.frac < 0.05);
+  return new Set((fresh.length >= 3 ? fresh : ranked.slice(0, 5)).map(b => b.name));
+}
+
+// Ray casting; ring is GeoJSON-order [lng, lat] pairs
+function pointInRing(lng, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if ((yi > lat) !== (yj > lat) && lng < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// ── GPX export of the suggested loop ──────────────────────────────────────────
+function downloadSuggestionGpx() {
+  if (!suggestionCoords) return;
+  const pts = suggestionCoords
+    .map(([lat, lng]) => `      <trkpt lat="${lat.toFixed(6)}" lon="${lng.toFixed(6)}"></trkpt>`)
+    .join('\n');
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="London Run Explorer" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>Suggested ${suggestDistanceKm} km loop</name>
+    <trkseg>
+${pts}
+    </trkseg>
+  </trk>
+</gpx>`;
+  const blob = new Blob([gpx], { type: 'application/gpx+xml' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = `suggested-run-${suggestDistanceKm}km.gpx`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ── Parks + helpers for suggestions ───────────────────────────────────────────

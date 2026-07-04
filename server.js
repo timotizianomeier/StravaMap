@@ -170,6 +170,45 @@ app.get('/api/parks', async (req, res) => {
   }
 });
 
+// ─── /api/route-suggestion ────────────────────────────────────────────────────
+// Generates a round-trip running loop via OpenRouteService, seeded at a point.
+// Requires ORS_API_KEY in .env (free key: https://openrouteservice.org/dev/#/signup)
+app.get('/api/route-suggestion', async (req, res) => {
+  const lat      = parseFloat(req.query.lat);
+  const lng      = parseFloat(req.query.lng);
+  const distance = parseInt(req.query.distance, 10); // metres
+  const seed     = parseInt(req.query.seed, 10) || 0;
+
+  if (!process.env.ORS_API_KEY) {
+    return res.status(503).json({ error: 'ORS_API_KEY not configured' });
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(distance)) {
+    return res.status(400).json({ error: 'lat, lng and distance are required' });
+  }
+
+  try {
+    const { data } = await axios.post(
+      'https://api.openrouteservice.org/v2/directions/foot-walking/geojson',
+      {
+        coordinates:  [[lng, lat]],
+        instructions: false,
+        options:      { round_trip: { length: distance, points: 4, seed } },
+      },
+      {
+        headers: { Authorization: process.env.ORS_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 20000,
+      }
+    );
+    res.json(data);
+  } catch (err) {
+    const status = err.response?.status;
+    const detail = err.response?.data?.error?.message || err.response?.data?.error || err.message;
+    console.error('Route suggestion error:', detail);
+    if (status === 401 || status === 403) return res.status(503).json({ error: 'ORS_API_KEY invalid or quota exceeded' });
+    res.status(502).json({ error: `Route generation failed: ${detail}` });
+  }
+});
+
 // ─── /api/activity/:id/stream ─────────────────────────────────────────────────
 app.get('/api/activity/:id/stream', async (req, res) => {
   const { id } = req.params;

@@ -9,7 +9,7 @@ Visualise all your Strava activities as GPS traces on an interactive London map.
 - **Interactive map** — every run/ride/walk drawn as a coloured polyline on OpenStreetMap
 - **Heatmap mode** — density view of where you run most
 - **Unexplored areas** — red overlay showing parts of London you haven't covered yet
-- **Suggest next run** — finds the largest unexplored cluster and pins a starting point
+- **Suggest next run** — generates a real 5/10/15 km loop route in a borough you haven't explored yet, with GPX download
 - **Elevation profile** — chart shown when you click any activity
 - **Incremental sync** — only fetches new activities since last sync, respects Strava rate limits
 - **Fully local cache** — all data stored in `cache/`; works offline once synced
@@ -42,7 +42,10 @@ STRAVA_CLIENT_ID=12345
 STRAVA_CLIENT_SECRET=your_secret_here
 STRAVA_REFRESH_TOKEN=          # leave blank for now
 PORT=3000
+ORS_API_KEY=                   # optional — see "Loop route suggestions" below
 ```
+
+**Loop route suggestions (optional):** to get real turn-by-turn 5/10/15 km loop routes from the 💡 Suggest button, grab a free API key from [openrouteservice.org](https://openrouteservice.org/dev/#/signup) (2,000 requests/day on the free tier) and put it in `ORS_API_KEY`. Without a key, the suggest button still works but only highlights an area to explore instead of drawing a route.
 
 ### 3. Install dependencies
 
@@ -80,7 +83,8 @@ Click **"↻ Sync new runs"** in the sidebar. The first sync fetches all your ac
 | **All routes** | Show each activity as a coloured polyline |
 | **Heatmap** | Density heatmap of all GPS points |
 | **Unexplored** | Red overlay = areas within London you haven't visited |
-| **💡 Suggest run** | Pins a starting point at the largest unexplored cluster |
+| **💡 Suggest run** | Generates a loop route (length set by the 5/10/15 km pills) in a borough you've barely visited; popup offers a GPX download |
+| **Loop length pills** | Choose 5, 10 or 15 km for the suggested loop |
 
 **Filters** — check/uncheck activity types, or pick a date range, to narrow which routes are shown.
 

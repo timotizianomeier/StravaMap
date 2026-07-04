@@ -265,6 +265,46 @@ header {
 [data-theme="dark"] .toggle-btn.suggest { border-color: #1a4035; background: #0a2820; color: #4ade80; }
 [data-theme="dark"] .toggle-btn.suggest:hover { background: #132e20; }
 
+/* Suggested loop length pills */
+.distance-row {
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border-bottom: 1px solid var(--border);
+}
+.distance-label {
+  font-size: 11px;
+  color: var(--text-meta);
+  margin-right: 2px;
+}
+.dist-pill {
+  padding: 3px 10px;
+  border: 1px solid var(--toggle-border);
+  border-radius: 20px;
+  background: var(--toggle-bg);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.dist-pill:hover { background: var(--toggle-hover); }
+.dist-pill.active { background: #fef3c7; border-color: #f59e0b; color: #92400e; font-weight: 600; }
+[data-theme="dark"] .dist-pill.active { background: #2d2206; border-color: #b45309; color: #fbbf24; }
+
+/* GPX download button inside the suggestion popup */
+.gpx-btn {
+  padding: 4px 10px;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gpx-btn:hover { background: #fde68a; }
+
 /* Activity list */
 .activity-list-wrapper {
   flex: 1;

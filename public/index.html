@@ -87,6 +87,14 @@
       <button id="btn-suggest" class="toggle-btn suggest"  onclick="suggestNextRun()">💡 Suggest run</button>
     </section>
 
+    <!-- Suggested loop length -->
+    <section class="distance-row">
+      <span class="distance-label">Loop length</span>
+      <button class="dist-pill" data-km="5"  onclick="setSuggestDistance(5)">5 km</button>
+      <button class="dist-pill" data-km="10" onclick="setSuggestDistance(10)">10 km</button>
+      <button class="dist-pill" data-km="15" onclick="setSuggestDistance(15)">15 km</button>
+    </section>
+
     <!-- Activity list -->
     <section class="activity-list-wrapper">
       <input id="search" type="search" placeholder="Search activities…" oninput="renderList()" />
