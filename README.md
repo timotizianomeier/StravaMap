@@ -10,10 +10,12 @@ Visualise all your Strava activities as GPS traces on an interactive London map.
 - **Heatmap mode** — density view of where you run most
 - **Unexplored areas** — red overlay showing parts of London you haven't covered yet
 - **Suggest next run** — generates a real 5/10/15 km loop route in a borough you haven't explored yet, with GPX download
+- **Borough boundaries** — dashed outlines and labels for all 33 London boroughs
+- **Dark mode** — 🌙 toggle switches the map tiles and UI theme
 - **Elevation profile** — chart shown when you click any activity
 - **Incremental sync** — only fetches new activities since last sync, respects Strava rate limits
 - **Fully local cache** — all data stored in `cache/`; works offline once synced
-- **Filter by type & date** — Run / Ride / Walk / Hike / Other, plus date-range picker
+- **Filter by type & date** — Run / Ride / Walk / Hike / Other, plus a date-range dropdown (last 30 days → all time)
 
 ---
 
@@ -85,6 +87,7 @@ Click **"↻ Sync new runs"** in the sidebar. The first sync fetches all your ac
 | **Unexplored** | Red overlay = areas within London you haven't visited |
 | **💡 Suggest run** | Generates a loop route (length set by the 5/10/15 km pills) in a borough you've barely visited; popup offers a GPX download |
 | **Loop length pills** | Choose 5, 10 or 15 km for the suggested loop |
+| **🌙 Dark mode** | Toggle between light and dark map tiles + UI theme |
 
 **Filters** — check/uncheck activity types, or pick a date range, to narrow which routes are shown.
 
@@ -104,6 +107,7 @@ london-run-explorer/
 ├── tokens.json              # OAuth tokens (auto-created, never committed)
 ├── cache/
 │   ├── activities.json      # all activities metadata
+│   ├── boroughs.json        # London borough boundaries GeoJSON (auto-downloaded)
 │   └── streams/             # per-activity GPS streams (fetched on demand)
 └── public/
     ├── index.html
