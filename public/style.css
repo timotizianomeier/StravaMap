@@ -203,7 +203,8 @@ header {
 }
 .btn-primary:hover { background: var(--btn-hover); }
 .btn-primary:disabled { background: var(--btn-disabled); cursor: default; }
-.btn-primary.syncing #sync-icon { display: inline-block; animation: spin 1s linear infinite; }
+.btn-primary.syncing #sync-icon,
+.btn-primary.syncing #tracks-icon { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .last-sync { font-size: 11px; color: var(--text-meta); flex: 1; }
 

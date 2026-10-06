@@ -8,6 +8,7 @@ Visualise all your Strava activities as GPS traces on an interactive map. Spot t
 
 - **Interactive map** — every run/ride/walk drawn as a coloured polyline over [Stadia Maps](https://stadiamaps.com/) tiles (free, no API key needed when running on localhost)
 - **Opens where you are** — the map zooms to your most recent GPS activity on load
+- **Full tracks** — Strava trims your privacy zones out of every route it hands out (the first and last few hundred metres). One click fetches the complete GPS stream for each activity so your runs are drawn in full
 - **Heatmap mode** — density view of where you run most
 - **Unexplored areas** — red overlay showing the ~1 km grid cells in view that you haven't covered yet (zoom in to level 9 or closer)
 - **Suggest next run** — generates a real 5/10/15 km loop route in an unexplored area within 15 km of you (or the map centre), with GPX download; inside London it targets a borough you haven't explored yet
@@ -83,6 +84,7 @@ Click **"↻ Sync new runs"** in the sidebar. The first sync fetches all your ac
 | Button | What it does |
 |---|---|
 | **↻ Sync new runs** | Pull new activities from Strava since last sync |
+| **⬇ Fetch full tracks** | Download the complete GPS stream for every activity that doesn't have one yet, so routes aren't cut short at your privacy zones. One API request per activity; stops at Strava's rate limit and continues when you click again. Hidden once everything is fetched |
 | **All routes** | Show each activity as a coloured polyline |
 | **Heatmap** | Density heatmap of all GPS points |
 | **Unexplored** | Red overlay = ~1 km cells in the current view you haven't visited (zoom in to level 9+) |
@@ -112,6 +114,7 @@ StravaMap/
 │   ├── activities.json      # all activities metadata
 │   ├── boroughs.json        # London borough boundaries GeoJSON (auto-downloaded)
 │   ├── parks/               # OSM park bounding boxes per search area (auto-downloaded)
+│   ├── tracks.json          # simplified full routes built from streams/ (auto-generated)
 │   └── streams/             # per-activity GPS streams (fetched on demand)
 └── public/
     ├── index.html
@@ -124,7 +127,8 @@ StravaMap/
 ## Ongoing use
 
 - The app **only fetches new activities** each time you sync — it respects Strava's rate limits (100 req/15 min, 1000/day).
-- GPS streams are fetched lazily — only when you click an activity for the elevation chart — and cached so they're never fetched twice.
+- GPS streams are fetched when you click an activity (for the elevation chart) or in bulk via **Fetch full tracks**, and cached so they're never fetched twice. The read limit is 100 requests per 15 minutes, so a few hundred activities take a few rounds.
+- **Why routes were cut short:** Strava applies your privacy zones to the summary polyline in every API response, even for you as the owner. Your own activity streams are not trimmed, which is what Fetch full tracks uses. Nothing leaves your machine; everything is cached in `cache/`.
 - If you get a rate-limit warning, wait 15 minutes and sync again.
 - Park data for run suggestions comes from OpenStreetMap via the Overpass API, fetched once per search area and cached in `cache/parks/`. If Overpass is busy, the suggestion still works, just without the park bias; try again later to pick it up.
 

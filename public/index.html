@@ -57,6 +57,15 @@
       <div id="last-sync" class="last-sync">Never synced</div>
     </section>
 
+    <!-- Full tracks: Strava's summary routes omit the start/end inside privacy zones -->
+    <section class="sync-bar">
+      <button id="btn-tracks" class="btn-primary hidden" onclick="fetchFullTracks()"
+              title="Strava hides the first and last few hundred metres inside your privacy zones from the summary route. This fetches the complete GPS stream for each activity (one API request per activity, cached locally).">
+        <span id="tracks-icon">⬇</span> Fetch full tracks
+      </button>
+      <div id="tracks-status" class="last-sync">Full tracks: —</div>
+    </section>
+
     <!-- Filters -->
     <section class="filters">
       <div class="filter-group">

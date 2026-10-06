@@ -70,6 +70,107 @@ function readStream(id) {
 
 function writeStream(id, data) {
   fs.writeFileSync(path.join(STREAMS_DIR, `${id}.json`), JSON.stringify(data, null, 2));
+  addTrack(id, data);
+}
+
+// ─── Full tracks ──────────────────────────────────────────────────────────────
+// Strava trims privacy zones out of every activity's summary polyline, but the
+// owner's latlng stream is complete. tracks.json maps activity id → encoded,
+// simplified polyline built from cached streams, so the map can draw full
+// routes without re-reading every stream file on each page load.
+const TRACKS_F            = path.join(CACHE_DIR, 'tracks.json');
+const TRACK_TOLERANCE_DEG = 0.00002; // ~2 m Douglas-Peucker tolerance
+let   tracksMemo          = null;
+
+function getTracks() {
+  if (tracksMemo) return tracksMemo;
+  if (fs.existsSync(TRACKS_F)) return (tracksMemo = JSON.parse(fs.readFileSync(TRACKS_F, 'utf8')));
+  return rebuildTracks();
+}
+
+function rebuildTracks() {
+  const tracks = {};
+  for (const f of fs.readdirSync(STREAMS_DIR)) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const t = trackFromStream(JSON.parse(fs.readFileSync(path.join(STREAMS_DIR, f), 'utf8')));
+      if (t) tracks[f.slice(0, -5)] = t;
+    } catch { /* skip unreadable stream */ }
+  }
+  tracksMemo = tracks;
+  fs.writeFileSync(TRACKS_F, JSON.stringify(tracks));
+  return tracks;
+}
+
+function addTrack(id, stream) {
+  const t = trackFromStream(stream);
+  if (!t) return;
+  const tracks = getTracks();
+  tracks[id] = t;
+  fs.writeFileSync(TRACKS_F, JSON.stringify(tracks));
+}
+
+function hasStream(id) { return fs.existsSync(path.join(STREAMS_DIR, `${id}.json`)); }
+
+// Encoded polyline of a stream's latlng data, or null when it has none.
+function trackFromStream(stream) {
+  const ll = stream?.latlng?.data;
+  if (!Array.isArray(ll) || ll.length < 2) return null;
+  return encodePolyline(simplify(ll, TRACK_TOLERANCE_DEG));
+}
+
+// Iterative Douglas-Peucker on [lat, lng] points.
+function simplify(points, tol) {
+  if (points.length <= 2) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = keep[points.length - 1] = 1;
+  const stack = [[0, points.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    let maxD = 0, idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const d = perpDistance(points[i], points[a], points[b]);
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD > tol) { keep[idx] = 1; stack.push([a, idx], [idx, b]); }
+  }
+  return points.filter((_, i) => keep[i]);
+}
+
+// Distance from p to segment a–b in degrees, with longitude scaled by
+// cos(lat) so the tolerance is roughly isotropic.
+function perpDistance([py, px], [ay, ax], [by, bx]) {
+  const k = Math.cos(py * Math.PI / 180);
+  px *= k; ax *= k; bx *= k;
+  const dx = bx - ax, dy = by - ay;
+  if (dx === 0 && dy === 0) return Math.hypot(px - ax, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+// Google encoded polyline algorithm, 1e5 precision (what the client decodes).
+function encodePolyline(points) {
+  const enc = v => {
+    v = v < 0 ? ~(v << 1) : (v << 1);
+    let out = '';
+    while (v >= 0x20) { out += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>= 5; }
+    return out + String.fromCharCode(v + 63);
+  };
+  let out = '', prevLat = 0, prevLng = 0;
+  for (const [lat, lng] of points) {
+    const la = Math.round(lat * 1e5), ln = Math.round(lng * 1e5);
+    out += enc(la - prevLat) + enc(ln - prevLng);
+    prevLat = la; prevLng = ln;
+  }
+  return out;
+}
+
+// True when Strava's 15-minute or daily read budget is nearly used up.
+// Prefers the read-specific headers; falls back to the overall ones.
+function readBudgetExhausted(headers) {
+  const usage = (headers['x-readratelimit-usage'] || headers['x-ratelimit-usage'] || '0,0').split(',').map(Number);
+  const limit = (headers['x-readratelimit-limit'] || headers['x-ratelimit-limit'] || '100,1000').split(',').map(Number);
+  return usage[0] >= limit[0] - 10 || usage[1] >= limit[1] - 20;
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -260,6 +361,62 @@ app.get('/api/activity/:id/stream', async (req, res) => {
     console.error(`Stream error ${id}:`, err.response?.data || err.message);
     res.status(500).json({ error: err.response?.data?.message || err.message });
   }
+});
+
+// ─── /api/tracks ──────────────────────────────────────────────────────────────
+// All cached full tracks (id → encoded polyline) plus how many GPS activities
+// still lack a cached stream.
+app.get('/api/tracks', (req, res) => {
+  const gps = readActivities().activities.filter(a => a.map?.summary_polyline);
+  res.json({
+    tracks:  getTracks(),
+    total:   gps.length,
+    missing: gps.filter(a => !hasStream(a.id)).length,
+  });
+});
+
+// ─── /api/tracks/backfill ─────────────────────────────────────────────────────
+// Fetches streams for up to ?limit GPS activities without a cached one, newest
+// first. Stops early when Strava's read budget is nearly spent (or on 429) so
+// a normal sync still has headroom; the client calls again for the next batch.
+app.post('/api/tracks/backfill', async (req, res) => {
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+  let token;
+  try { token = await getAccessToken(); }
+  catch { return res.status(401).json({ error: 'Not authenticated', redirect: '/auth/strava' }); }
+
+  const pending = readActivities().activities
+    .filter(a => a.map?.summary_polyline && !hasStream(a.id))
+    .sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
+
+  let fetched = 0, rateLimitHit = false, error = null;
+  for (const a of pending.slice(0, limit)) {
+    try {
+      const { data, headers } = await axios.get(
+        `https://www.strava.com/api/v3/activities/${a.id}/streams`,
+        {
+          params:  { keys: 'latlng,altitude,time,distance', key_by_type: true },
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      writeStream(a.id, data);
+      fetched++;
+      if (readBudgetExhausted(headers)) { rateLimitHit = true; break; }
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 429) { rateLimitHit = true; break; }
+      if (status === 404) { writeStream(a.id, {}); continue; } // no streams exist; don't retry forever
+      error = err.response?.data?.message || err.message;
+      break;
+    }
+  }
+
+  res.json({
+    fetched,
+    remaining: pending.filter(a => !hasStream(a.id)).length,
+    rateLimitHit,
+    error,
+  });
 });
 
 // ─── /api/sync ────────────────────────────────────────────────────────────────

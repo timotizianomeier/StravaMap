@@ -59,6 +59,10 @@ let activeId        = null;
 let currentView     = 'routes'; // 'routes' | 'heatmap'
 let showUnexplored  = false;
 let visitedCells    = new Set(); // "lat_lng" keys
+let fullTracks      = {};        // id → encoded full polyline (privacy zones included)
+let fullTrackCoords = new Map(); // id → decoded [lat, lng] pairs (memo)
+let tracksTotal     = 0;         // GPS activities
+let tracksMissing   = 0;         // …of which still lack a cached stream
 let darkMode        = localStorage.getItem('darkMode') === 'true';
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
@@ -80,6 +84,7 @@ async function init() {
 
   setSuggestDistance(suggestDistanceKm);
   loadBoroughs();
+  await loadTracks();      // before activities so the first draw uses full tracks
   await loadActivities();
   focusLatestActivity();
 }
@@ -219,7 +224,7 @@ function focusLatestActivity() {
     .filter(a => a.map?.summary_polyline)
     .sort((a, b) => new Date(b.start_date) - new Date(a.start_date))[0];
   if (!latest) return;
-  const coords = decodePolyline(latest.map.summary_polyline);
+  const coords = getCoords(latest);
   if (!coords.length) return;
   map.fitBounds(L.latLngBounds(coords), { padding: [40, 40], maxZoom: 14 });
 }
@@ -261,7 +266,7 @@ function drawPolylines(activities) {
 }
 
 function addPolyline(activity) {
-  const coords = decodePolyline(activity.map.summary_polyline);
+  const coords = getCoords(activity);
   if (!coords.length) return;
 
   const color = getColor(activity.type);
@@ -294,9 +299,10 @@ function drawHeatmap(activities) {
   const points = [];
   activities.forEach(a => {
     if (!a.map?.summary_polyline) return;
-    const coords = decodePolyline(a.map.summary_polyline);
-    // Sample every 3rd point for performance
-    for (let i = 0; i < coords.length; i += 3) {
+    const coords = getCoords(a);
+    // Sample to ~20 points per km so full tracks and trimmed summaries weigh the same
+    const step = Math.max(1, Math.round(coords.length / Math.max(1, (a.distance || 0) / 1000 * 20)));
+    for (let i = 0; i < coords.length; i += step) {
       points.push([coords[i][0], coords[i][1], 0.5]);
     }
   });
@@ -349,6 +355,15 @@ async function loadElevation(id) {
   try {
     const r    = await fetch(`/api/activity/${id}/stream`);
     const data = await r.json();
+
+    // The server caches this stream as a full track; use it right away.
+    if (data?.latlng?.data?.length > 1 && !fullTrackCoords.has(id) && !fullTracks[id]) {
+      fullTrackCoords.set(id, data.latlng.data);
+      tracksMissing = Math.max(0, tracksMissing - 1);
+      updateTracksUI();
+      polylineLayers[id]?.layer.setLatLngs(data.latlng.data);
+      computeCoverage();
+    }
 
     if (!data?.altitude?.data?.length) {
       panel.classList.add('hidden');
@@ -428,8 +443,7 @@ function computeCoverage() {
 
   for (const a of allActivities) {
     if (!a.map?.summary_polyline) continue;
-    const coords = decodePolyline(a.map.summary_polyline);
-    for (const [lat, lng] of coords) {
+    for (const [lat, lng] of getCoords(a)) {
       // Snap to grid cell (SW corner)
       const cellLat = Math.floor(lat / GRID_SIZE) * GRID_SIZE;
       const cellLng = Math.floor(lng / GRID_SIZE) * GRID_SIZE;
@@ -936,6 +950,82 @@ async function syncRuns() {
   } finally {
     btn.disabled = false;
     btn.classList.remove('syncing');
+  }
+}
+
+// ── Full tracks ───────────────────────────────────────────────────────────────
+// Strava trims your privacy zones out of each activity's summary polyline, so
+// the first and last few hundred metres are missing. The per-activity GPS
+// stream is complete, so we fetch and cache it for every GPS activity and draw
+// from it whenever it is available.
+
+// Full track when cached, otherwise Strava's trimmed summary polyline.
+function getCoords(activity) {
+  let c = fullTrackCoords.get(activity.id);
+  if (c) return c;
+  const enc = fullTracks[activity.id];
+  if (enc) {
+    c = decodePolyline(enc);
+    fullTrackCoords.set(activity.id, c);
+    return c;
+  }
+  return activity.map?.summary_polyline ? decodePolyline(activity.map.summary_polyline) : [];
+}
+
+async function loadTracks() {
+  try {
+    const r = await fetch('/api/tracks');
+    const d = await r.json();
+    fullTracks    = d.tracks  || {};
+    tracksTotal   = d.total   ?? 0;
+    tracksMissing = d.missing ?? 0;
+    fullTrackCoords.clear();
+  } catch { /* fall back to summary polylines */ }
+  updateTracksUI();
+}
+
+function updateTracksUI() {
+  const have = tracksTotal - tracksMissing;
+  document.getElementById('tracks-status').textContent =
+    tracksTotal ? `Full tracks: ${have} / ${tracksTotal}${tracksMissing ? '' : ' ✓'}` : 'Full tracks: —';
+  document.getElementById('btn-tracks').classList.toggle('hidden', tracksMissing === 0);
+}
+
+async function fetchFullTracks() {
+  const btn    = document.getElementById('btn-tracks');
+  const status = document.getElementById('tracks-status');
+  btn.disabled = true;
+  btn.classList.add('syncing');
+  document.getElementById('rate-banner').classList.add('hidden');
+
+  let fetchedTotal = 0;
+  try {
+    while (true) {
+      status.textContent = `Fetching full tracks… ${tracksTotal - tracksMissing} / ${tracksTotal}`;
+      const r = await fetch('/api/tracks/backfill?limit=10', { method: 'POST' });
+      const d = await r.json();
+      if (r.status === 401) { window.location.href = '/auth/strava'; return; }
+
+      fetchedTotal += d.fetched || 0;
+      await loadTracks();
+      applyFilters();     // redraw with the new full tracks
+      computeCoverage();
+
+      if (d.error) { showBanner('error', `Track fetch error: ${d.error}`); break; }
+      if (d.rateLimitHit) {
+        document.getElementById('rate-banner').classList.remove('hidden');
+        showToast(`Strava rate limit reached — ${tracksMissing} track${tracksMissing === 1 ? '' : 's'} left, try again in 15 minutes`, 'warn');
+        break;
+      }
+      if (!tracksMissing || !d.fetched) break;
+    }
+    if (fetchedTotal) showToast(`Fetched ${fetchedTotal} full track${fetchedTotal === 1 ? '' : 's'}`, 'success');
+  } catch {
+    showBanner('error', 'Could not reach the server — check your connection.');
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('syncing');
+    updateTracksUI();
   }
 }
 
