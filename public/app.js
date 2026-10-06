@@ -38,7 +38,6 @@ const TYPE_ICON = {
 // ── State ────────────────────────────────────────────────────────────────────
 let map;
 let tileLayer       = null;
-let labelsLayer     = null;
 let boroughLayer    = null;
 let boroughGeoJSON  = null;   // cached for re-render on theme switch
 let allActivities   = [];
@@ -92,16 +91,12 @@ function initMap() {
     zoomControl: true,
   });
 
-  // Custom panes: base (200) → boroughs (250) → routes (400, default) → labels (650)
+  // Custom panes: base (200) → boroughs (250) → routes (400, default)
   map.createPane('boroughs');
   map.getPane('boroughs').style.zIndex = 250;
   map.getPane('boroughs').style.pointerEvents = 'none';
-  map.createPane('labels');
-  map.getPane('labels').style.zIndex = 650;
-  map.getPane('labels').style.pointerEvents = 'none';
 
-  tileLayer   = makeTileLayer(darkMode).addTo(map);
-  labelsLayer = makeLabelsLayer(darkMode).addTo(map);
+  tileLayer = makeTileLayer(darkMode).addTo(map);
 
   // Apply saved dark mode on load
   applyDarkMode(false);
@@ -130,21 +125,15 @@ function initMap() {
 }
 
 // ── Dark mode ─────────────────────────────────────────────────────────────────
+// Stadia Maps "Alidade Smooth" tiles — free without an API key when served
+// from localhost (CARTO's basemaps started requiring a key in 2026).
+// Labels are baked into these tiles, so no separate labels overlay is needed.
 function makeTileLayer(dark) {
-  const url = dark
-    ? 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png'
-    : 'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png';
-  return L.tileLayer(url, {
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions">CARTO</a>',
-    maxZoom: 19,
+  const style = dark ? 'alidade_smooth_dark' : 'alidade_smooth';
+  return L.tileLayer(`https://tiles.stadiamaps.com/tiles/${style}/{z}/{x}/{y}{r}.png`, {
+    attribution: '© <a href="https://stadiamaps.com/">Stadia Maps</a> © <a href="https://openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxZoom: 20,
   });
-}
-
-function makeLabelsLayer(dark) {
-  const url = dark
-    ? 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
-    : 'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png';
-  return L.tileLayer(url, { pane: 'labels', maxZoom: 19, attribution: '' });
 }
 
 function applyDarkMode(redraw = true) {
@@ -158,8 +147,7 @@ function toggleDarkMode() {
   darkMode = !darkMode;
   localStorage.setItem('darkMode', darkMode);
 
-  if (tileLayer)   { map.removeLayer(tileLayer);   tileLayer   = makeTileLayer(darkMode).addTo(map);   tileLayer.bringToBack(); }
-  if (labelsLayer) { map.removeLayer(labelsLayer);  labelsLayer = makeLabelsLayer(darkMode).addTo(map); }
+  if (tileLayer) { map.removeLayer(tileLayer); tileLayer = makeTileLayer(darkMode).addTo(map); tileLayer.bringToBack(); }
   if (boroughGeoJSON) renderBoroughs(boroughGeoJSON);
 
   applyDarkMode(true);

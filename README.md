@@ -6,7 +6,7 @@ Visualise all your Strava activities as GPS traces on an interactive London map.
 
 ## Features
 
-- **Interactive map** — every run/ride/walk drawn as a coloured polyline on OpenStreetMap
+- **Interactive map** — every run/ride/walk drawn as a coloured polyline over [Stadia Maps](https://stadiamaps.com/) tiles (free, no API key needed when running on localhost)
 - **Heatmap mode** — density view of where you run most
 - **Unexplored areas** — red overlay showing parts of London you haven't covered yet
 - **Suggest next run** — generates a real 5/10/15 km loop route in a borough you haven't explored yet, with GPX download
