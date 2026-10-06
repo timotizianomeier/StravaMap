@@ -11,7 +11,7 @@ Visualise all your Strava activities as GPS traces on an interactive map. Spot t
 - **Heatmap mode** — density view of where you run most
 - **Unexplored areas** — red overlay showing the ~1 km grid cells in view that you haven't covered yet (zoom in to level 9 or closer)
 - **Suggest next run** — generates a real 5/10/15 km loop route in an unexplored area within 15 km of you (or the map centre), with GPX download; inside London it targets a borough you haven't explored yet
-- **London borough boundaries** — dashed outlines and labels for all 33 London boroughs
+- **London borough boundaries** — dashed outlines and labels for all 33 London boroughs (visible whenever you pan over London)
 - **Dark mode** — 🌙 toggle switches the map tiles and UI theme
 - **Elevation profile** — chart shown when you click any activity
 - **Incremental sync** — only fetches new activities since last sync, respects Strava rate limits
@@ -94,12 +94,14 @@ Click **"↻ Sync new runs"** in the sidebar. The first sync fetches all your ac
 
 **Click a route** on the map or in the sidebar list to highlight it and see its elevation profile.
 
+**Location** — Suggest run asks the browser for your position so it can search near you. If you decline (or it times out), the centre of the current map view is used instead.
+
 ---
 
 ## Project structure
 
 ```
-london-run-explorer/
+StravaMap/
 ├── .env                     # secrets — never committed
 ├── .env.example             # template
 ├── .gitignore
@@ -124,6 +126,7 @@ london-run-explorer/
 - The app **only fetches new activities** each time you sync — it respects Strava's rate limits (100 req/15 min, 1000/day).
 - GPS streams are fetched lazily — only when you click an activity for the elevation chart — and cached so they're never fetched twice.
 - If you get a rate-limit warning, wait 15 minutes and sync again.
+- Park data for run suggestions comes from OpenStreetMap via the Overpass API, fetched once per search area and cached in `cache/parks/`. If Overpass is busy, the suggestion still works, just without the park bias; try again later to pick it up.
 
 ---
 
