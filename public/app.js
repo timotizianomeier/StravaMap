@@ -1,11 +1,14 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   London Run Explorer — app.js
+   Run Explorer — app.js
    ═══════════════════════════════════════════════════════════════════════════ */
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const LONDON_CENTER = [51.505, -0.09];
-const LONDON_BOUNDS = { minLat: 51.28, maxLat: 51.72, minLng: -0.51, maxLng: 0.34 };
-const GRID_SIZE     = 0.01; // ~1 km grid cells
+const GRID_SIZE        = 0.01; // ~1 km grid cells
+const SEARCH_RADIUS_KM = 15;   // half-width of the "suggest run" search box outside London
+
+// Inner London — when the athlete is inside the borough boundaries, run
+// suggestions stay within this box and target under-explored boroughs.
+const LONDON_INNER_BOUNDS = { minLat: 51.38, maxLat: 51.62, minLng: -0.35, maxLng: 0.18 };
 
 const TYPE_COLOR = {
   Run:        '#3b82f6', // blue
@@ -50,7 +53,7 @@ let suggestionRoute   = null;   // Leaflet polyline of the generated loop
 let suggestionCoords  = null;   // [lat, lng] pairs of the loop (for GPX export)
 let suggestDistanceKm = +(localStorage.getItem('suggestDistanceKm') || 10);
 let boroughCellIndex  = null;   // Map: grid cell key → borough name (built lazily)
-let parkCells         = new Set(); // grid keys overlapping OSM parks
+let parkCache         = new Map(); // bbox key → Set of grid keys overlapping OSM parks
 let elevChart         = null;
 let activeId        = null;
 let currentView     = 'routes'; // 'routes' | 'heatmap'
@@ -78,18 +81,14 @@ async function init() {
   setSuggestDistance(suggestDistanceKm);
   loadBoroughs();
   await loadActivities();
-  loadParks(); // fire-and-forget; improves suggestions once resolved
+  focusLatestActivity();
 }
 
 // ── Map setup ─────────────────────────────────────────────────────────────────
 function initMap() {
-  const saved = (() => { try { return JSON.parse(localStorage.getItem('mapView')); } catch { return null; } })();
-
-  map = L.map('map', {
-    center: saved?.center ? [saved.center.lat, saved.center.lng] : LONDON_CENTER,
-    zoom:   saved?.zoom   ?? 11,
-    zoomControl: true,
-  });
+  // World view until activities load; focusLatestActivity() then zooms to the
+  // most recent GPS activity, wherever it was.
+  map = L.map('map', { center: [20, 0], zoom: 2, zoomControl: true });
 
   // Custom panes: base (200) → boroughs (250) → routes (400, default)
   map.createPane('boroughs');
@@ -100,11 +99,6 @@ function initMap() {
 
   // Apply saved dark mode on load
   applyDarkMode(false);
-
-  // Persist view
-  map.on('moveend zoomend', () => {
-    localStorage.setItem('mapView', JSON.stringify({ center: map.getCenter(), zoom: map.getZoom() }));
-  });
 
   // Add legend
   const legend = L.control({ position: 'bottomright' });
@@ -217,6 +211,17 @@ async function loadActivities() {
   renderList();
   applyFilters();       // draws polylines + stats
   computeCoverage();
+}
+
+// Zoom the map to the athlete's most recent activity that has a GPS trace.
+function focusLatestActivity() {
+  const latest = allActivities
+    .filter(a => a.map?.summary_polyline)
+    .sort((a, b) => new Date(b.start_date) - new Date(a.start_date))[0];
+  if (!latest) return;
+  const coords = decodePolyline(latest.map.summary_polyline);
+  if (!coords.length) return;
+  map.fitBounds(L.latLngBounds(coords), { padding: [40, 40], maxZoom: 14 });
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -403,6 +408,7 @@ function toggleUnexplored() {
 
   if (showUnexplored) {
     buildUnexploredLayer();
+    if (map.getZoom() < CanvasCoverageLayer.MIN_ZOOM) showToast('Zoom in to see unexplored areas', 'warn');
   } else {
     if (coverageLayer) { coverageLayer.remove(); coverageLayer = null; }
     clearSuggestion();
@@ -437,24 +443,20 @@ function computeCoverage() {
 
 function buildUnexploredLayer() {
   if (coverageLayer) { coverageLayer.remove(); coverageLayer = null; }
-
-  // Collect all unvisited cells within London bounds
-  const unvisited = [];
-  for (let lat = LONDON_BOUNDS.minLat; lat < LONDON_BOUNDS.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
-    for (let lng = LONDON_BOUNDS.minLng; lng < LONDON_BOUNDS.maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
-      const key = `${lat.toFixed(4)}_${lng.toFixed(4)}`;
-      if (!visitedCells.has(key)) unvisited.push([lat, lng]);
-    }
-  }
-
-  coverageLayer = new CanvasCoverageLayer(unvisited);
+  coverageLayer = new CanvasCoverageLayer(visitedCells);
   coverageLayer.addTo(map);
 }
 
 // ── Canvas coverage layer ─────────────────────────────────────────────────────
+// Shades every ~1 km grid cell in the current viewport that no activity has
+// passed through. Cells are enumerated per render from the visible bounds, so
+// the overlay works anywhere in the world. Below MIN_ZOOM a cell is only a
+// pixel or two wide (and there are millions of them), so nothing is drawn.
 class CanvasCoverageLayer {
-  constructor(cells) {
-    this._cells  = cells;
+  static MIN_ZOOM = 9;
+
+  constructor(visited) {
+    this._visited = visited;
     this._canvas = null;
     this._map    = null;
     this._onMove = () => this._render();
@@ -488,16 +490,23 @@ class CanvasCoverageLayer {
     const ctx = this._canvas.getContext('2d');
     ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
     ctx.fillStyle = 'rgba(239,68,68,0.18)';
+    if (this._map.getZoom() < CanvasCoverageLayer.MIN_ZOOM) return;
 
     const gs = GRID_SIZE;
-    for (const [lat, lng] of this._cells) {
-      const sw = this._map.latLngToContainerPoint([lat, lng]);
-      const ne = this._map.latLngToContainerPoint([lat + gs, lng + gs]);
-      const x  = Math.min(sw.x, ne.x);
-      const y  = Math.min(sw.y, ne.y);
-      const w  = Math.abs(ne.x - sw.x) + 1;
-      const h  = Math.abs(ne.y - sw.y) + 1;
-      if (w > 0.5 && h > 0.5) ctx.fillRect(x, y, w, h);
+    const b  = this._map.getBounds();
+    const startLat = +(Math.floor(b.getSouth() / gs) * gs).toFixed(4);
+    const startLng = +(Math.floor(b.getWest()  / gs) * gs).toFixed(4);
+    for (let lat = startLat; lat < b.getNorth(); lat = +(lat + gs).toFixed(4)) {
+      for (let lng = startLng; lng < b.getEast(); lng = +(lng + gs).toFixed(4)) {
+        if (this._visited.has(`${lat.toFixed(4)}_${lng.toFixed(4)}`)) continue;
+        const sw = this._map.latLngToContainerPoint([lat, lng]);
+        const ne = this._map.latLngToContainerPoint([lat + gs, lng + gs]);
+        const x  = Math.min(sw.x, ne.x);
+        const y  = Math.min(sw.y, ne.y);
+        const w  = Math.abs(ne.x - sw.x) + 1;
+        const h  = Math.abs(ne.y - sw.y) + 1;
+        if (w > 0.5 && h > 0.5) ctx.fillRect(x, y, w, h);
+      }
     }
   }
 }
@@ -531,17 +540,27 @@ async function suggestNextRun() {
   } catch {}
 
   try {
-    // Restrict the search to boroughs the athlete has barely set foot in
-    if (!boroughCellIndex) boroughCellIndex = buildBoroughCellIndex();
-    const targetBoroughs = pickTargetBoroughs();
+    const getKey = (lat, lng) => `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+    const snap   = v => +(Math.floor(v / GRID_SIZE) * GRID_SIZE).toFixed(4);
 
-    // Build unvisited cells in inner London, limited to target boroughs
-    const innerBounds = { minLat: 51.38, maxLat: 51.62, minLng: -0.35, maxLng: 0.18 };
-    const getKey  = (lat, lng) => `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+    // Reference point: the athlete's position, or the map centre as fallback.
+    const ref = userPos ?? { lat: map.getCenter().lat, lng: map.getCenter().lng };
+
+    // Inside London, restrict the search to boroughs the athlete has barely
+    // set foot in. Anywhere else, search a box around the reference point.
+    if (!boroughCellIndex) boroughCellIndex = buildBoroughCellIndex();
+    const inLondon       = boroughCellIndex?.has(getKey(snap(ref.lat), snap(ref.lng))) ?? false;
+    const targetBoroughs = inLondon ? pickTargetBoroughs() : null;
+    const bounds         = inLondon ? LONDON_INNER_BOUNDS : boxAround(ref, SEARCH_RADIUS_KM);
+
+    btn.textContent = '⏳ Finding parks…';
+    const parkCells = await loadParks(bounds);
+
+    // Build unvisited cells in the search box (limited to target boroughs in London)
     const unvisited = [];
     const cellSet   = new Set();
-    for (let lat = innerBounds.minLat; lat < innerBounds.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
-      for (let lng = innerBounds.minLng; lng < innerBounds.maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
+    for (let lat = bounds.minLat; lat < bounds.maxLat; lat = +(lat + GRID_SIZE).toFixed(4)) {
+      for (let lng = bounds.minLng; lng < bounds.maxLng; lng = +(lng + GRID_SIZE).toFixed(4)) {
         const key = getKey(lat, lng);
         if (visitedCells.has(key)) continue;
         if (targetBoroughs && !targetBoroughs.has(boroughCellIndex.get(key))) continue;
@@ -551,7 +570,8 @@ async function suggestNextRun() {
     }
 
     if (!unvisited.length) {
-      showToast("You've explored every borough! 🎉", 'success');
+      showToast(inLondon ? "You've explored every borough! 🎉"
+                         : `Nothing left to explore within ${SEARCH_RADIUS_KM} km! 🎉`, 'success');
       return;
     }
 
@@ -559,7 +579,6 @@ async function suggestNextRun() {
     // candidate cell by how unexplored its (2r+1)² neighbourhood is, boosted
     // by parks and closeness to the user (or the current map view).
     const radiusCells = Math.max(1, Math.round(suggestDistanceKm / 4));
-    const ref = userPos ?? { lat: map.getCenter().lat, lng: map.getCenter().lng };
 
     let best = null;
     for (const [lat, lng] of unvisited) {
@@ -746,7 +765,7 @@ function downloadSuggestionGpx() {
     .map(([lat, lng]) => `      <trkpt lat="${lat.toFixed(6)}" lon="${lng.toFixed(6)}"></trkpt>`)
     .join('\n');
   const gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="London Run Explorer" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="Run Explorer" xmlns="http://www.topografix.com/GPX/1/1">
   <trk>
     <name>Suggested ${suggestDistanceKm} km loop</name>
     <trkseg>
@@ -763,12 +782,24 @@ ${pts}
 }
 
 // ── Parks + helpers for suggestions ───────────────────────────────────────────
-async function loadParks() {
+// Grid-snapped box of ±km around a point (longitude scaled by latitude).
+function boxAround({ lat, lng }, km) {
+  const dLat = km / 111;
+  const dLng = km / (111 * Math.cos(lat * Math.PI / 180));
+  const snap = v => +(Math.floor(v / GRID_SIZE) * GRID_SIZE).toFixed(4);
+  return { minLat: snap(lat - dLat), maxLat: snap(lat + dLat), minLng: snap(lng - dLng), maxLng: snap(lng + dLng) };
+}
+
+// Grid cells overlapping OSM parks inside `bounds`, cached per box.
+// Returns an empty Set on failure — parks only bias suggestions.
+async function loadParks(bounds) {
+  const bbox = [bounds.minLat, bounds.minLng, bounds.maxLat, bounds.maxLng].map(n => n.toFixed(2)).join(',');
+  if (parkCache.has(bbox)) return parkCache.get(bbox);
+  const cells = new Set();
   try {
-    const r = await fetch('/api/parks');
+    const r = await fetch(`/api/parks?bbox=${bbox}`);
     const parks = await r.json();
-    // Precompute a Set of all grid cell keys that overlap any park bounding box
-    const cells = new Set();
+    if (!r.ok || !Array.isArray(parks)) return cells; // transient failure: don't cache
     for (const p of parks) {
       const startLat = +(Math.floor(p.minLat / GRID_SIZE) * GRID_SIZE).toFixed(4);
       const startLng = +(Math.floor(p.minLng / GRID_SIZE) * GRID_SIZE).toFixed(4);
@@ -778,8 +809,9 @@ async function loadParks() {
         }
       }
     }
-    parkCells = cells;
+    parkCache.set(bbox, cells);
   } catch { /* non-critical */ }
+  return cells;
 }
 
 function haversineKm(lat1, lng1, lat2, lng2) {

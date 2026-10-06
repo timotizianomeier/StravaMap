@@ -127,7 +127,7 @@ app.get('/api/activities', (req, res) => {
 
 // ─── /api/boroughs ────────────────────────────────────────────────────────────
 const BOROUGHS_F = path.join(CACHE_DIR, 'boroughs.json');
-const PARKS_F    = path.join(CACHE_DIR, 'parks.json');
+const PARKS_DIR  = path.join(CACHE_DIR, 'parks');
 
 app.get('/api/boroughs', async (req, res) => {
   if (fs.existsSync(BOROUGHS_F)) {
@@ -147,14 +147,39 @@ app.get('/api/boroughs', async (req, res) => {
 });
 
 // ─── /api/parks ───────────────────────────────────────────────────────────────
+// Bounding boxes of OSM parks inside ?bbox=minLat,minLng,maxLat,maxLng
+// (defaults to Greater London). Cached per box under cache/parks/.
+const LONDON_BBOX = { minLat: 51.28, minLng: -0.51, maxLat: 51.72, maxLng: 0.34 };
+const MAX_BBOX_DEG = 1.5;
+
 app.get('/api/parks', async (req, res) => {
-  if (fs.existsSync(PARKS_F)) return res.sendFile(PARKS_F);
+  let bbox = LONDON_BBOX;
+  if (req.query.bbox) {
+    const parts = String(req.query.bbox).split(',').map(Number);
+    if (parts.length !== 4 || parts.some(n => !Number.isFinite(n))) {
+      return res.status(400).json({ error: 'bbox must be minLat,minLng,maxLat,maxLng' });
+    }
+    const [minLat, minLng, maxLat, maxLng] = parts;
+    if (maxLat <= minLat || maxLng <= minLng || maxLat - minLat > MAX_BBOX_DEG || maxLng - minLng > MAX_BBOX_DEG) {
+      return res.status(400).json({ error: `bbox must be non-empty and at most ${MAX_BBOX_DEG}° per side` });
+    }
+    bbox = { minLat, minLng, maxLat, maxLng };
+  }
+
+  const bb   = `${bbox.minLat},${bbox.minLng},${bbox.maxLat},${bbox.maxLng}`;
+  const file = path.join(PARKS_DIR, `${bb.replace(/,/g, '_')}.json`);
+  if (fs.existsSync(file)) return res.sendFile(file);
+
   try {
-    const query = '[out:json][timeout:30];(way["leisure"="park"](51.28,-0.51,51.72,0.34);relation["leisure"="park"](51.28,-0.51,51.72,0.34););out bb;';
+    const query = `[out:json][timeout:30];(way["leisure"="park"](${bb});relation["leisure"="park"](${bb}););out bb;`;
     const { data } = await axios.post(
       'https://overpass-api.de/api/interpreter',
       `data=${encodeURIComponent(query)}`,
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 35000 }
+      {
+        // overpass-api.de answers 406 to generic client User-Agents (e.g. axios/x.y)
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'RunExplorer/1.0 (local Strava visualiser)' },
+        timeout: 35000,
+      }
     );
     const parks = data.elements
       .filter(e => e.bounds)
@@ -162,11 +187,12 @@ app.get('/api/parks', async (req, res) => {
         minLat: e.bounds.minlat, maxLat: e.bounds.maxlat,
         minLng: e.bounds.minlon, maxLng: e.bounds.maxlon,
       }));
-    fs.writeFileSync(PARKS_F, JSON.stringify(parks));
+    fs.mkdirSync(PARKS_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(parks));
     res.json(parks);
   } catch (err) {
     console.error('Failed to fetch parks:', err.message);
-    res.json([]);
+    res.status(502).json({ error: `Overpass request failed: ${err.message}` });
   }
 });
 
@@ -294,7 +320,7 @@ app.post('/api/sync', async (req, res) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🗺  London Run Explorer  →  http://localhost:${PORT}`);
+  console.log(`\n🗺  Run Explorer  →  http://localhost:${PORT}`);
   const t = readTokens();
   if (!t?.refresh_token) {
     console.log(`\n   ⚠️  Not authenticated yet.`);

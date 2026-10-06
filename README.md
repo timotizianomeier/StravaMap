@@ -1,16 +1,17 @@
-# London Run Explorer 🗺
+# Run Explorer 🗺
 
-Visualise all your Strava activities as GPS traces on an interactive London map. Spot the gaps, discover new areas, and plan your next run.
+Visualise all your Strava activities as GPS traces on an interactive map. Spot the gaps, discover new areas, and plan your next run — wherever you are.
 
 ---
 
 ## Features
 
 - **Interactive map** — every run/ride/walk drawn as a coloured polyline over [Stadia Maps](https://stadiamaps.com/) tiles (free, no API key needed when running on localhost)
+- **Opens where you are** — the map zooms to your most recent GPS activity on load
 - **Heatmap mode** — density view of where you run most
-- **Unexplored areas** — red overlay showing parts of London you haven't covered yet
-- **Suggest next run** — generates a real 5/10/15 km loop route in a borough you haven't explored yet, with GPX download
-- **Borough boundaries** — dashed outlines and labels for all 33 London boroughs
+- **Unexplored areas** — red overlay showing the ~1 km grid cells in view that you haven't covered yet (zoom in to level 9 or closer)
+- **Suggest next run** — generates a real 5/10/15 km loop route in an unexplored area within 15 km of you (or the map centre), with GPX download; inside London it targets a borough you haven't explored yet
+- **London borough boundaries** — dashed outlines and labels for all 33 London boroughs
 - **Dark mode** — 🌙 toggle switches the map tiles and UI theme
 - **Elevation profile** — chart shown when you click any activity
 - **Incremental sync** — only fetches new activities since last sync, respects Strava rate limits
@@ -25,7 +26,7 @@ Visualise all your Strava activities as GPS traces on an interactive London map.
 
 1. Go to [https://www.strava.com/settings/api](https://www.strava.com/settings/api)
 2. Fill in:
-   - **Application Name**: London Run Explorer (or anything)
+   - **Application Name**: Run Explorer (or anything)
    - **Category**: Visualisation
    - **Website**: `http://localhost:3000`
    - **Authorization Callback Domain**: `localhost`
@@ -84,8 +85,8 @@ Click **"↻ Sync new runs"** in the sidebar. The first sync fetches all your ac
 | **↻ Sync new runs** | Pull new activities from Strava since last sync |
 | **All routes** | Show each activity as a coloured polyline |
 | **Heatmap** | Density heatmap of all GPS points |
-| **Unexplored** | Red overlay = areas within London you haven't visited |
-| **💡 Suggest run** | Generates a loop route (length set by the 5/10/15 km pills) in a borough you've barely visited; popup offers a GPX download |
+| **Unexplored** | Red overlay = ~1 km cells in the current view you haven't visited (zoom in to level 9+) |
+| **💡 Suggest run** | Generates a loop route (length set by the 5/10/15 km pills) in an unexplored area near you; in London it picks a borough you've barely visited. Popup offers a GPX download |
 | **Loop length pills** | Choose 5, 10 or 15 km for the suggested loop |
 | **🌙 Dark mode** | Toggle between light and dark map tiles + UI theme |
 
@@ -108,6 +109,7 @@ london-run-explorer/
 ├── cache/
 │   ├── activities.json      # all activities metadata
 │   ├── boroughs.json        # London borough boundaries GeoJSON (auto-downloaded)
+│   ├── parks/               # OSM park bounding boxes per search area (auto-downloaded)
 │   └── streams/             # per-activity GPS streams (fetched on demand)
 └── public/
     ├── index.html

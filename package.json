@@ -1,7 +1,7 @@
 {
-  "name": "london-run-explorer",
+  "name": "run-explorer",
   "version": "1.0.0",
-  "description": "Visualise your Strava runs on an interactive London map",
+  "description": "Visualise your Strava runs on an interactive map",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
